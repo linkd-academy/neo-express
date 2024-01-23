@@ -20,8 +20,10 @@ using Neo.SmartContract;
 using Neo.Wallets;
 using NeoExpress.Models;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Numerics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace NeoExpress
 {
@@ -79,6 +81,89 @@ namespace NeoExpress
                 text = String.Empty;
                 return false;
             }
+        }
+
+        public static bool TryGetBytesFromHexString(this string text, out Span<byte> bytes)
+        {
+            bytes = null;
+            if (IsValidHexString(text))
+            {
+                bytes = text.HexToBytes();
+                return true;
+            }
+            return false;
+        }
+
+        public static bool IsValidHexString(this string text)
+        {
+            if (text.Length % 2 != 0)
+                return false;
+            foreach (var c in text)
+            {
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' & c <= 'F')))
+                    return false;
+            }
+            return true;
+        }
+
+
+        public static bool TryGetBytesFromBase64String(this string text, out Span<byte> bytes)
+        {
+            bytes = null;
+            text = Base64Fixed(text);
+            Span<byte> buffer = new byte[text.Length * 3 / 4];
+            if (Convert.TryFromBase64String(text, buffer, out var bytesWritten))
+            {
+                bytes = buffer[..bytesWritten];
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Convert Unicode Characters to AscII Characters by Regular Expressions.
+        /// </summary>
+        /// <param name="str">Base64 string with Unicode escaping. e.g. DCECbzTesnBofh/Xng1SofChKkBC7jhVmLxCN1vk\u002B49xa2pBVuezJw==</param>
+        /// <returns>Base64 strings without Unicode escaping. e.g. DCECbzTesnBofh/Xng1SofChKkBC7jhVmLxCN1vk+49xa2pBVuezJw==</returns>
+        public static string Base64Fixed(string str)
+        {
+            //Unicode e.g. \u002B
+            MatchCollection mc = Regex.Matches(str, @"\\u([\w]{2})([\w]{2})", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+            byte[] bts = new byte[2];
+            foreach (Match m in mc)
+            {
+                bts[0] = (byte)int.Parse(m.Groups[2].Value, NumberStyles.HexNumber);
+                bts[1] = (byte)int.Parse(m.Groups[1].Value, NumberStyles.HexNumber);
+                str = str.Replace(m.ToString(), Encoding.Unicode.GetString(bts));
+            }
+            return str;
+        }
+
+
+        public static string EscapeString(this string text)
+        {
+            if (text.Any(IsInvisibleChar))
+            {
+                var sb = new StringBuilder();
+                foreach (var c in text)
+                {
+                    if (c.IsInvisibleChar())
+                    {
+                        sb.Append($"\\u{(int)c:x4}");
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                    }
+                }
+                return sb.ToString();
+            }
+            return text;
+        }
+
+        public static bool IsInvisibleChar(this char c)
+        {
+            return char.IsControl(c) || char.IsHighSurrogate(c) || char.IsLowSurrogate(c);
         }
 
         public static void WriteJson(this Newtonsoft.Json.JsonWriter writer, Neo.Json.JToken? json)

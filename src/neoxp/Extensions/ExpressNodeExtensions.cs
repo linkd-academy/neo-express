@@ -278,14 +278,22 @@ namespace NeoExpress
                                                       ContractManifest manifest,
                                                       Wallet wallet,
                                                       UInt160 accountHash,
-                                                      WitnessScope witnessScope)
+                                                      WitnessScope witnessScope,
+                                                      object? data = null)
         {
             CheckNefFile(nefFile);
             using var sb = new ScriptBuilder();
-            sb.EmitDynamicCall(contractHash,
-                "update",
-                nefFile.ToArray(),
-                manifest.ToJson().ToString());
+            if (data == null)
+                sb.EmitDynamicCall(contractHash,
+                    "update",
+                    nefFile.ToArray(),
+                    manifest.ToJson().ToString());
+            else
+                sb.EmitDynamicCall(contractHash,
+                    "update",
+                    nefFile.ToArray(),
+                    manifest.ToJson().ToString(),
+                    data);
 
             return await expressNode.ExecuteAsync(wallet, accountHash, witnessScope, sb.ToArray()).ConfigureAwait(false);
         }
@@ -445,10 +453,8 @@ namespace NeoExpress
             throw new Exception("invalid script results");
         }
 
-        public static async Task<List<string>> GetNFTAsync(this IExpressNode expressNode, UInt160 accountHash, string asset)
+        public static async Task<List<string>> GetNFTAsync(this IExpressNode expressNode, UInt160 accountHash, UInt160 assetHash)
         {
-            var assetHash = await expressNode.ParseAssetAsync(asset).ConfigureAwait(false);
-
             using var sb = new ScriptBuilder();
             sb.EmitDynamicCall(assetHash, "tokensOf", accountHash);
 
@@ -464,7 +470,7 @@ namespace NeoExpress
                 {
                     while (iterator.Next())
                     {
-                        list.Add(iterator.Value(null).GetString()!);
+                        list.Add(Convert.ToBase64String(iterator.Value(null).GetSpan()));
                     }
                 }
             }

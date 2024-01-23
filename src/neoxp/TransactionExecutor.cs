@@ -11,6 +11,7 @@
 
 using Neo;
 using Neo.BlockchainToolkit;
+using Neo.Cryptography.ECC;
 using Neo.Network.P2P.Payloads;
 using Neo.Network.RPC;
 using Neo.SmartContract;
@@ -55,7 +56,7 @@ namespace NeoExpress
 
         public IExpressNode ExpressNode => expressNode;
 
-        public async Task ContractUpdateAsync(string contract, string nefFilePath, string accountName, string password, WitnessScope witnessScope)
+        public async Task ContractUpdateAsync(string contract, string nefFilePath, string accountName, string password, WitnessScope witnessScope, object? data = null)
         {
             if (!chainManager.TryGetSigningAccount(accountName, password, out var wallet, out var accountHash))
             {
@@ -70,20 +71,21 @@ namespace NeoExpress
                     : throw new InvalidOperationException($"contract \"{contract}\" not found");
 
             var originalManifest = await expressNode.GetContractAsync(scriptHash).ConfigureAwait(false);
-            var updateMethod = originalManifest.Abi.GetMethod("update", 2);
-            if (updateMethod == null)
+            var updateMethod1 = originalManifest.Abi.GetMethod("update", 2);
+            var updateMethod2 = originalManifest.Abi.GetMethod("update", 3);
+            if (updateMethod1 == null && updateMethod2 == null)
             {
                 throw new Exception($"update method on {contract} contract not found.");
             }
-            if (updateMethod.Parameters[0].Type != ContractParameterType.ByteArray
-                || updateMethod.Parameters[1].Type != ContractParameterType.String)
+            if ((updateMethod1?.Parameters[0].Type != ContractParameterType.ByteArray || updateMethod1?.Parameters[1].Type != ContractParameterType.String) &&
+                (updateMethod2?.Parameters[0].Type != ContractParameterType.ByteArray || updateMethod2?.Parameters[1].Type != ContractParameterType.String))
             {
                 throw new Exception($"update method on {contract} contract has unexpected signature.");
             }
 
             var (nefFile, manifest) = await fileSystem.LoadContractAsync(nefFilePath).ConfigureAwait(false);
             var txHash = await expressNode
-                .UpdateAsync(scriptHash, nefFile, manifest, wallet, accountHash, witnessScope)
+                .UpdateAsync(scriptHash, nefFile, manifest, wallet, accountHash, witnessScope, data)
                 .ConfigureAwait(false);
             await writer.WriteTxHashAsync(txHash, "Update", json).ConfigureAwait(false);
         }
@@ -115,9 +117,20 @@ namespace NeoExpress
                     if (standards[i] == "NEP-17")
                         nep17 = true;
                 }
+
                 if (nep11 && nep17)
                 {
                     throw new Exception($"{manifest.Name} Contract declares support for both NEP-11 and NEP-17 standards. Use --force to deploy contract with invalid supported standards declarations.");
+                }
+
+                if (nep17 && manifest.IsNep17Compliant() == false)
+                {
+                    throw new Exception($"{manifest.Name} Contract declares support for NEP-17 standards. However is not NEP-17 compliant. Invalid methods/events.");
+                }
+
+                if (nep11 && manifest.IsNep11Compliant() == false)
+                {
+                    throw new Exception($"{manifest.Name} Contract declares support for NEP-11 standards. However is not NEP-11 compliant. Invalid methods/events.");
                 }
             }
 
@@ -164,6 +177,12 @@ namespace NeoExpress
 
             var parser = await expressNode.GetContractParameterParserAsync(chainManager.Chain).ConfigureAwait(false);
             return await parser.LoadInvocationScriptAsync(invocationFile).ConfigureAwait(false);
+        }
+
+        public ContractParameter ContractParameterParser(string parameterJson)
+        {
+            var parser = new ContractParameterParser(expressNode.ProtocolSettings, chainManager.Chain.TryGetAccountHash);
+            return parser.ParseParameter(parameterJson);
         }
 
         public async Task<Script> BuildInvocationScriptAsync(string contract, string operation, IReadOnlyList<string>? arguments = null)
@@ -283,7 +302,7 @@ namespace NeoExpress
                     case Neo.VM.Types.ByteString byteString:
                         if (byteString.GetSpan().TryGetUtf8String(out var text))
                         {
-                            await WriteLineAsync($"{Neo.Helper.ToHexString(byteString.GetSpan())}({text})").ConfigureAwait(false);
+                            await WriteLineAsync($"{Neo.Helper.ToHexString(byteString.GetSpan())}({text.EscapeString()})").ConfigureAwait(false);
                         }
                         else
                         {
@@ -294,7 +313,10 @@ namespace NeoExpress
                         await WriteLineAsync("<null>").ConfigureAwait(false);
                         break;
                     case Neo.VM.Types.Array array:
-                        await WriteLineAsync($"Array: ({array.Count})").ConfigureAwait(false);
+                        if (item is Neo.VM.Types.Struct)
+                            await WriteLineAsync($"Struct: ({array.Count})").ConfigureAwait(false);
+                        else
+                            await WriteLineAsync($"Array: ({array.Count})").ConfigureAwait(false);
                         for (int i = 0; i < array.Count; i++)
                         {
                             await WriteStackItemAsync(writer, array[i], indent + 1).ConfigureAwait(false);
@@ -438,10 +460,16 @@ namespace NeoExpress
                 throw new Exception($"{sender} sender not found.");
             }
 
-            var getHashResult = await expressNode.TryGetAccountHashAsync(chainManager.Chain, receiver).ConfigureAwait(false);
-            if (getHashResult.TryPickT1(out _, out var receiverHash))
+            if (!UInt160.TryParse(receiver, out var receiverHash)) //script hash
             {
-                throw new Exception($"{receiver} account not found.");
+                if (!chainManager.Chain.TryParseScriptHash(receiver, out receiverHash)) //address
+                {
+                    var getHashResult = await expressNode.TryGetAccountHashAsync(chainManager.Chain, receiver).ConfigureAwait(false); //wallet name
+                    if (getHashResult.TryPickT1(out _, out receiverHash))
+                    {
+                        throw new Exception($"{receiver} account not found.");
+                    }
+                }
             }
 
             ContractParameter? dataParam = null;
@@ -450,10 +478,95 @@ namespace NeoExpress
                 var parser = await expressNode.GetContractParameterParserAsync(chainManager.Chain).ConfigureAwait(false);
                 dataParam = parser.ParseParameter(data);
             }
-
-            var assetHash = await expressNode.ParseAssetAsync(contract).ConfigureAwait(false);
+            var parser2 = await expressNode.GetContractParameterParserAsync(chainManager.Chain).ConfigureAwait(false);
+            var assetHash = parser2.TryLoadScriptHash(contract, out var value)
+                ? value
+                : UInt160.TryParse(contract, out var uint160)
+                    ? uint160
+                    : throw new InvalidOperationException($"contract \"{contract}\" not found");
             var txHash = await expressNode.TransferNFTAsync(assetHash, tokenId, senderWallet, senderAccountHash, receiverHash, dataParam);
             await writer.WriteTxHashAsync(txHash, "TransferNFT", json).ConfigureAwait(false);
+        }
+
+        public async Task RegisterCandidateAsync(string account, string password)
+        {
+            if (!chainManager.TryGetSigningAccount(account, password, out var wallet, out var accountHash))
+            {
+                throw new Exception($"{account} account not found.");
+            }
+            var publicKey = wallet.GetAccount(accountHash).GetKey()?.PublicKey;
+            using var builder = new ScriptBuilder();
+            builder.EmitDynamicCall(NativeContract.NEO.Hash, "registerCandidate", publicKey);
+
+            var txHash = await expressNode.ExecuteAsync(wallet, accountHash, WitnessScope.CalledByEntry, builder.ToArray()).ConfigureAwait(false);
+            await writer.WriteTxHashAsync(txHash, $"Register Candidate", json).ConfigureAwait(false);
+        }
+
+        public async Task UnregisterCandidateAsync(string account, string password)
+        {
+            if (!chainManager.TryGetSigningAccount(account, password, out var wallet, out var accountHash))
+            {
+                throw new Exception($"{account} account not found.");
+            }
+            var publicKey = wallet.GetAccount(accountHash).GetKey()?.PublicKey;
+            using var builder = new ScriptBuilder();
+            builder.EmitDynamicCall(NativeContract.NEO.Hash, "unregisterCandidate", publicKey);
+
+            var txHash = await expressNode.ExecuteAsync(wallet, accountHash, WitnessScope.CalledByEntry, builder.ToArray()).ConfigureAwait(false);
+            await writer.WriteTxHashAsync(txHash, $"Unregister Candidate", json).ConfigureAwait(false);
+        }
+
+        public async Task VoteAsync(string account, string? publicKey, string password)
+        {
+            if (!chainManager.TryGetSigningAccount(account, password, out var wallet, out var accountHash))
+            {
+                throw new Exception($"{account} account not found.");
+            }
+
+            using var builder = new ScriptBuilder();
+            if (!string.IsNullOrEmpty(publicKey))
+            {
+                if (!ECPoint.TryParse(publicKey, ECCurve.Secp256r1, out ECPoint point))
+                {
+                    throw new Exception($"PublicKey is not valid.");
+                }
+                builder.EmitDynamicCall(NativeContract.NEO.Hash, "vote", accountHash, point);
+            }
+            else
+            {
+                builder.EmitDynamicCall(NativeContract.NEO.Hash, "vote", accountHash, null);
+            }
+
+            var txHash = await expressNode.ExecuteAsync(wallet, accountHash, WitnessScope.CalledByEntry, builder.ToArray()).ConfigureAwait(false);
+            await writer.WriteTxHashAsync(txHash, $"Vote/Unvote", json).ConfigureAwait(false);
+        }
+
+        public async Task<List<string>> ListCandidatesAsync()
+        {
+            using var builder = new ScriptBuilder();
+            builder.EmitDynamicCall(NativeContract.NEO.Hash, "getCandidates");
+
+            var result = await expressNode.InvokeAsync(builder.ToArray()).ConfigureAwait(false);
+            var stack = result.Stack;
+            var list = new List<string>();
+            try
+            {
+                if (result.State != VMState.FAULT
+                        && result.Stack.Length >= 1
+                        && result.Stack[0] is Neo.VM.Types.Array array)
+                {
+                    for (var i = 0; i < array.Count; i++)
+                    {
+                        var value = (Neo.VM.Types.Array)array[i];
+                        list.Add($"{((Neo.VM.Types.ByteString)value?[0])?.GetSpan().ToHexString(),-67}{((Neo.VM.Types.Integer)value?[1]).GetInteger()}");
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                throw new Exception("invalid script results");
+            }
+            return list;
         }
 
         public async Task<OneOf<PolicyValues, None>> TryGetRemoteNetworkPolicyAsync(string rpcUri)

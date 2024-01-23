@@ -22,8 +22,10 @@ namespace NeoExpress
     [Subcommand(
         typeof(BatchCommand),
         typeof(CheckpointCommand),
+        typeof(CandidateCommand),
         typeof(ContractCommand),
         typeof(CreateCommand),
+        typeof(ExecuteCommand),
         typeof(ExportCommand),
         typeof(FastForwardCommand),
         typeof(OracleCommand),

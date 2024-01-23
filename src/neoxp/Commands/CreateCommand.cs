@@ -29,7 +29,7 @@ namespace NeoExpress.Commands
             this.txExecutorFactory = txExecutorFactory;
         }
 
-        [Argument(0, Description = $"Name of {EXPRESS_EXTENSION} file to create\nDefault location is home directory as:\nLinux: $HOME/.neo-express/{DEFAULT_EXPRESS_FILENAME}\nWindows: %UserProfile%\\.neo-express\\{DEFAULT_EXPRESS_FILENAME}")]
+        [Option(Description = $"Name of {EXPRESS_EXTENSION} file to create\nDefault location is home directory as:\nLinux: $HOME/.neo-express/{DEFAULT_EXPRESS_FILENAME}\nWindows: %UserProfile%\\.neo-express\\{DEFAULT_EXPRESS_FILENAME}")]
         internal string Output { get; set; } = string.Empty;
 
         [Option(Description = "Number of consensus nodes to create (Default: 1)")]
@@ -45,10 +45,16 @@ namespace NeoExpress.Commands
         [Option(Description = "Private key for default dev account (Format: HEX or WIF)\nDefault: Random")]
         internal string PrivateKey { get; set; } = string.Empty;
 
+        [Option(Description = "Use a batch file to initialize the blockchain after creation.")]
+        internal string BatchFilename { get; set; } = string.Empty;
+
         internal async Task<int> OnExecuteAsync(CommandLineApplication app, IConsole console, CancellationToken token)
         {
             try
             {
+                if (string.IsNullOrEmpty(BatchFilename) == false && fileSystem.File.Exists(BatchFilename) == false)
+                    throw new FileNotFoundException(BatchFilename);
+
                 byte[]? priKey = null;
                 if (string.IsNullOrEmpty(PrivateKey) == false)
                 {
@@ -72,15 +78,13 @@ namespace NeoExpress.Commands
                 await console.Out.WriteLineAsync("\x1b[33m   Note: The private keys for the accounts in this file are are *not* encrypted.").ConfigureAwait(false);
                 await console.Out.WriteLineAsync("         Do not use these accounts on MainNet or in any other system where security is a concern.\x1b[0m\n").ConfigureAwait(false);
 
-                var batchFilename = fileSystem.ResolveFileName(string.Empty, EXPRESS_BATCH_EXTENSION, () => DEFAULT_SETUP_BATCH_FILENAME);
-
-                if (fileSystem.File.Exists(batchFilename))
+                if (fileSystem.File.Exists(BatchFilename))
                 {
                     var batchCommand = new BatchCommand(chainManagerFactory, fileSystem, txExecutorFactory);
-                    var batchFileInfo = fileSystem.FileInfo.New(batchFilename);
+                    var batchFileInfo = fileSystem.FileInfo.New(BatchFilename);
                     var batchDirInfo = batchFileInfo.Directory ?? throw new InvalidOperationException("batchFileInfo.Directory is null");
 
-                    var commands = await fileSystem.File.ReadAllLinesAsync(batchFilename, token).ConfigureAwait(false);
+                    var commands = await fileSystem.File.ReadAllLinesAsync(BatchFilename, token).ConfigureAwait(false);
                     await batchCommand.ExecuteAsync(batchDirInfo, commands, console.Out, chainManager, outputPath).ConfigureAwait(false);
                 }
 
